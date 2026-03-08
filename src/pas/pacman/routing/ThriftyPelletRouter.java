@@ -39,6 +39,17 @@ class PelletDistance implements Comparable<PelletDistance>
 public class ThriftyPelletRouter
     extends PelletRouter
 {
+    // When the board still has a lot of pellets left, solving the full ordering problem
+    // exactly behaves like a TSP search and explodes in the number of states.
+    // This threshold keeps the large early-game in a fast greedy mode and only hands
+    // a much smaller late-game to weighted A*.
+    private static final int HYBRID_ASTAR_THRESHOLD = 6;
+
+    // A weight greater than 1.0 tells A* to trust the heuristic more aggressively,
+    // which trims queue growth in the late-game search where exact optimality is less
+    // important than returning a strong move quickly.
+    private static final float WEIGHTED_ASTAR_HEURISTIC_WEIGHT = 2.0f;
+
 
     // If you want to encode other information you think is useful for planning the order
     // of pellets ot eat besides Coordinates and data available in GameView
@@ -142,6 +153,56 @@ public class ThriftyPelletRouter
         return totalWeight;
     }
 
+    private Coordinate getNearestPelletCoordinate(final PelletVertex src,
+                                                  final PelletExtraParams params)
+    {
+        Coordinate bestPellet = null;
+        float bestDistance = Float.POSITIVE_INFINITY;
+
+        // Greedy nearest-neighbor is intentionally cheap here:
+        // one scan over the remaining pellets uses cached board distances
+        // and picks a strong next target without branching the whole state space.
+        for(Coordinate pellet : src.getRemainingPelletCoordinates())
+        {
+            float dist = this.getCachedDistance(src, pellet, params);
+            if(dist < bestDistance)
+            {
+                bestDistance = dist;
+                bestPellet = pellet;
+            }
+        }
+
+        return bestPellet;
+    }
+
+    private Path<PelletVertex> buildGreedyPrefix(final PelletVertex initial,
+                                                 final PelletExtraParams params)
+    {
+        Path<PelletVertex> greedyPath = new Path<>(initial);
+        PelletVertex current = initial;
+
+        // This loop is the key scaling change:
+        // instead of asking A* to reason about all pellet permutations on big boards,
+        // we deterministically peel off nearby pellets until the tail is small enough
+        // for the search to finish quickly.
+        while(current.getRemainingPelletCoordinates().size() > HYBRID_ASTAR_THRESHOLD)
+        {
+            Coordinate nextPellet = this.getNearestPelletCoordinate(current, params);
+            if(nextPellet == null)
+            {
+                break;
+            }
+
+            PelletVertex nextState = current.removePellet(nextPellet);
+            float pathCost = this.getCachedDistance(current, nextPellet, params);
+
+            greedyPath = new Path<>(nextState, pathCost, 0.0f, greedyPath);
+            current = nextState;
+        }
+
+        return greedyPath;
+    }
+
     @Override
     public Collection<PelletVertex> getOutgoingNeighbors(final PelletVertex src,
                                                          final GameView game,
@@ -221,19 +282,6 @@ public class ThriftyPelletRouter
 
         sessionParams.cache.clear();
         sessionParams.mstCache.clear();
-
-        PriorityQueue<Path<PelletVertex>> q = new PriorityQueue<>(
-            (p1,p2) -> {
-                float f1 = p1.getTrueCost() + p1.getEstimatedPathCostToGoal();
-                float f2 = p2.getTrueCost() + p2.getEstimatedPathCostToGoal();
-                return Float.compare(f1,f2);
-            }
-        );
-        Set<PelletVertex> visited = new HashSet<>(); //store the visited states
-        Path<PelletVertex> start = new Path<>(initial);
-        float pathCost;
-        float heuristic;
-        q.add(start);
         // This one-time nested loop pays the board-search cost up front,
         // so every later heuristic edge lookup becomes a HashMap read instead of a BFS.
         List<Coordinate> importantCoords = new ArrayList<>(initial.getRemainingPelletCoordinates());
@@ -256,6 +304,27 @@ public class ThriftyPelletRouter
                 sessionParams.cache.get(c2).put(c1, dist);
             }
         }
+
+        Path<PelletVertex> start = this.buildGreedyPrefix(initial, sessionParams);
+        if(start.getDestination().getRemainingPelletCoordinates().isEmpty())
+        {
+            return start;
+        }
+
+        PriorityQueue<Path<PelletVertex>> q = new PriorityQueue<>(
+            (p1,p2) -> {
+                float f1 = p1.getTrueCost() + (WEIGHTED_ASTAR_HEURISTIC_WEIGHT * p1.getEstimatedPathCostToGoal());
+                float f2 = p2.getTrueCost() + (WEIGHTED_ASTAR_HEURISTIC_WEIGHT * p2.getEstimatedPathCostToGoal());
+                return Float.compare(f1,f2);
+            }
+        );
+        Set<PelletVertex> visited = new HashSet<>(); //store the visited states
+        float pathCost;
+        float heuristic;
+
+        // The queue starts after the greedy prefix, so weighted A* only solves the small tail.
+        start.setEstimatedPathCostToGoal(this.getHeuristic(start.getDestination(), game, sessionParams));
+        q.add(start);
 
         while(!q.isEmpty())
         {
