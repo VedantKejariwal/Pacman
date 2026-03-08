@@ -2,21 +2,19 @@ package src.pas.pacman.agents;
 
 
 // SYSTEM IMPORTS
-import edu.bu.pas.pacman.agents.Agent;
 import edu.bu.pas.pacman.agents.SearchAgent;
 import edu.bu.pas.pacman.game.Action;
 import edu.bu.pas.pacman.game.Game.GameView;
+import edu.bu.pas.pacman.game.entity.Entity;
+import edu.bu.pas.pacman.game.entity.Ghost;
 import edu.bu.pas.pacman.graph.Path;
 import edu.bu.pas.pacman.graph.PelletGraph.PelletVertex;
 import edu.bu.pas.pacman.routing.BoardRouter;
 import edu.bu.pas.pacman.routing.PelletRouter;
 import edu.bu.pas.pacman.utils.Coordinate;
-import edu.bu.pas.pacman.utils.Pair;
-import java.util.Collection;
 import java.util.Stack;
 
 import java.util.Random;
-import java.util.Set;
 import java.util.List;
 import java.util.ArrayList;
 
@@ -49,6 +47,38 @@ public class PacmanAgent
     public final Random getRandom() { return this.random; }
     public final BoardRouter getBoardRouter() { return this.boardRouter; }
     public final PelletRouter getPelletRouter() { return this.pelletRouter; }
+
+    private int getChebyshevDistance(final Coordinate c1,
+                                     final Coordinate c2)
+    {
+        return Math.max(Math.abs(c1.x() - c2.x()), Math.abs(c1.y() - c2.y()));
+    }
+
+    private boolean shouldRefreshPlan(final GameView game,
+                                      final Coordinate current)
+    {
+        for(Integer id : game.getAllEntityIds())
+        {
+            Entity entity = game.getEntity(id);
+            if(!(entity instanceof Ghost))
+            {
+                continue;
+            }
+
+            Ghost ghost = (Ghost)entity;
+            if(!ghost.getIsAlive() || ghost.getIsScared())
+            {
+                continue;
+            }
+
+            if(this.getChebyshevDistance(current, ghost.getCurrentCoordinate()) <= this.getGhostChaseRadius() + 1)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     @Override
     public void makePlan(final GameView game)
@@ -111,6 +141,10 @@ public class PacmanAgent
     public Action makeMove(final GameView game)
     {
         Coordinate current = game.getEntity(this.getMyEntityId()).getCurrentCoordinate();
+        if(this.getTargetCoordinate() != null && this.shouldRefreshPlan(game, current))
+        {
+            this.makePlan(game);
+        }
         if(this.getPlanToGetToTarget() == null || this.getPlanToGetToTarget().isEmpty())
         {
             Path<PelletVertex> pelletpath = this.getPelletRouter().graphSearch(game);

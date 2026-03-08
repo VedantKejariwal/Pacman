@@ -7,22 +7,18 @@ import java.util.Collection;
 
 
 // JAVA PROJECT IMPORTS
-import edu.bu.pas.pacman.game.Action;
 import edu.bu.pas.pacman.game.Game.GameView;
 import edu.bu.pas.pacman.graph.Path;
 import edu.bu.pas.pacman.graph.PelletGraph.PelletVertex;
 import edu.bu.pas.pacman.routing.PelletRouter;
-import edu.bu.pas.pacman.routing.PelletRouter.ExtraParams;
 import edu.bu.pas.pacman.utils.Coordinate;
 import edu.bu.pas.pacman.utils.DistanceMetric;
-import edu.bu.pas.pacman.utils.Pair;
 import java.util.Set;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.HashMap;
 import java.util.HashSet;
 import edu.bu.pas.pacman.routing.BoardRouter;
-import src.pas.pacman.routing.ThriftyBoardRouter;
 
 class PelletDistance implements Comparable<PelletDistance>
 {
@@ -54,6 +50,7 @@ public class ThriftyPelletRouter
         public final BoardRouter boardRouter;
 
         public final HashMap<Coordinate, HashMap<Coordinate, Float>> cache = new HashMap<>();
+        public final HashMap<Set<Coordinate>, Float> mstCache = new HashMap<>();
 
         public PelletExtraParams (GameView game, BoardRouter boardRouter)
         {
@@ -125,52 +122,63 @@ public class ThriftyPelletRouter
                               final GameView game,
                               final ExtraParams params)
     {
-        // TODO: implement me!
         if(!src.getRemainingPelletCoordinates().isEmpty())
         {
-            Coordinate current = src.getPacmanCoordinate();
-            Collection<PelletVertex> neighbours = getOutgoingNeighbors(src, game, params);
-            //HashMap<Coordinate, Coordinate> parents = new HashMap<>();
+            PelletExtraParams ep = (params == null) ? null : (PelletExtraParams)params;
             float totalWeight =0.0f;
             float distance;
-            HashMap<Coordinate, Float> minEdegeWeights = new HashMap<>();
             PriorityQueue<PelletDistance> edgeDistance = new PriorityQueue<>();
             Set<Coordinate> visited = new HashSet<>();
+            Set<Coordinate> mstKey = new HashSet<>(src.getRemainingPelletCoordinates());
             Coordinate start = src.getRemainingPelletCoordinates().iterator().next(); //any random pellet as the starting point
-            visited.add(start);
-            //parents.put(start, null);
-            //prim's algorithm to find MST
-            for(Coordinate p : src.getRemainingPelletCoordinates())
+
+            if(ep != null && ep.mstCache.containsKey(mstKey))
             {
-                if(visited.contains(p))
-                {
-                    continue;
-                }
-                distance = DistanceMetric.manhattanDistance(start, p);
-                edgeDistance.add(new PelletDistance(p,distance));
+                totalWeight = ep.mstCache.get(mstKey);
             }
-            while(!edgeDistance.isEmpty())
+            else
             {
-                PelletDistance currentEdge = edgeDistance.poll();
-                if(visited.contains(currentEdge.coord))
-                {
-                    continue;
-                }
-                totalWeight = totalWeight + currentEdge.distance;
-                visited.add(currentEdge.coord);
+                visited.add(start);
+                //prim's algorithm to find MST
                 for(Coordinate p : src.getRemainingPelletCoordinates())
                 {
-                    if(!visited.contains(p))
+                    if(visited.contains(p))
                     {
-                        float d = DistanceMetric.manhattanDistance(currentEdge.coord, p);
-                        edgeDistance.add(new PelletDistance(p, d));
+                        continue;
+                    }
+                    distance = getEdgeWeight(src.removePellet(start), src.removePellet(p), params);
+                    edgeDistance.add(new PelletDistance(p,distance));
+                }
+
+                while(!edgeDistance.isEmpty())
+                {
+                    PelletDistance currentEdge = edgeDistance.poll();
+                    if(visited.contains(currentEdge.coord))
+                    {
+                        continue;
+                    }
+                    totalWeight = totalWeight + currentEdge.distance;
+                    visited.add(currentEdge.coord);
+                    for(Coordinate p : src.getRemainingPelletCoordinates())
+                    {
+                        if(!visited.contains(p))
+                        {
+                            float d = getEdgeWeight(src.removePellet(currentEdge.coord), src.removePellet(p), params);
+                            edgeDistance.add(new PelletDistance(p, d));
+                        }
                     }
                 }
+
+                if(ep != null)
+                {
+                    ep.mstCache.put(mstKey, totalWeight);
+                }
             }
+
             float minSourceDist = Float.POSITIVE_INFINITY;
             for(Coordinate p : src.getRemainingPelletCoordinates())
             {
-                float d = DistanceMetric.manhattanDistance(current, p);
+                float d = getEdgeWeight(src, src.removePellet(p), params);
                 if(d<minSourceDist)
                 {
                     minSourceDist = d;
@@ -184,11 +192,36 @@ public class ThriftyPelletRouter
     @Override
     public Path<PelletVertex> graphSearch(final GameView game) 
     {
-        // TODO: implement me!
         PelletVertex initial = new PelletVertex(game);
         
         BoardRouter br = new ThriftyBoardRouter(this.getMyUnidId(), this.getPacmanId(), this.getGhostChaseRadius());
         PelletExtraParams sessionParams = new PelletExtraParams(game, br);
+
+        sessionParams.cache.clear();
+        sessionParams.mstCache.clear();
+
+        List<Coordinate> importantCoords = new ArrayList<>(initial.getRemainingPelletCoordinates());
+        importantCoords.add(initial.getPacmanCoordinate());
+        for(int i = 0; i < importantCoords.size(); i++)
+        {
+            Coordinate c1 = importantCoords.get(i);
+            sessionParams.cache.putIfAbsent(c1, new HashMap<>());
+            for(int j = i + 1; j < importantCoords.size(); j++)
+            {
+                Coordinate c2 = importantCoords.get(j);
+                if(sessionParams.cache.get(c1).containsKey(c2))
+                {
+                    continue;
+                }
+
+                Path<Coordinate> pairPath = br.graphSearch(c1, c2, game);
+                float dist = (pairPath == null) ? Float.POSITIVE_INFINITY : pairPath.getTrueCost();
+
+                sessionParams.cache.get(c1).put(c2, dist);
+                sessionParams.cache.putIfAbsent(c2, new HashMap<>());
+                sessionParams.cache.get(c2).put(c1, dist);
+            }
+        }
 
         PriorityQueue<Path<PelletVertex>> q = new PriorityQueue<>(
             (p1,p2) -> {
