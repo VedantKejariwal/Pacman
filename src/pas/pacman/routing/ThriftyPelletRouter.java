@@ -70,6 +70,78 @@ public class ThriftyPelletRouter
         // if you add fields don't forget to initialize them here!
     }
 
+    private float getCachedDistance(final Coordinate c1,
+                                    final Coordinate c2,
+                                    final PelletExtraParams params)
+    {
+        // This first branch reads the already-known board distance in O(1) time,
+        // which is the whole reason the heuristic stops re-running BFS inside Prim's algorithm.
+        if(params.cache.containsKey(c1) && params.cache.get(c1).containsKey(c2))
+        {
+            return params.cache.get(c1).get(c2);
+        }
+
+        // This fallback keeps the method correct even if a pair was not precomputed for some reason.
+        Path<Coordinate> path = params.boardRouter.graphSearch(c1, c2, params.game);
+        float dist = (path == null) ? Float.POSITIVE_INFINITY : path.getTrueCost();
+
+        // These two puts mirror the undirected grid distance in both directions,
+        // so later lookups from either endpoint are constant-time.
+        params.cache.putIfAbsent(c1, new HashMap<>());
+        params.cache.get(c1).put(c2, dist);
+        params.cache.putIfAbsent(c2, new HashMap<>());
+        params.cache.get(c2).put(c1, dist);
+
+        return dist;
+    }
+
+    private float getCachedDistance(final PelletVertex src,
+                                    final Coordinate dst,
+                                    final PelletExtraParams params)
+    {
+        return this.getCachedDistance(src.getPacmanCoordinate(), dst, params);
+    }
+
+    private float calculateMstWeight(final PelletVertex src,
+                                     final PelletExtraParams params)
+    {
+        float totalWeight = 0.0f;
+        PriorityQueue<PelletDistance> edgeDistance = new PriorityQueue<>();
+        Set<Coordinate> visited = new HashSet<>();
+        Coordinate start = src.getRemainingPelletCoordinates().iterator().next(); //any random pellet as the starting point
+
+        visited.add(start);
+        // Prim's algorithm stays in place, but every edge weight now comes from the precomputed cache.
+        for(Coordinate p : src.getRemainingPelletCoordinates())
+        {
+            if(visited.contains(p))
+            {
+                continue;
+            }
+            edgeDistance.add(new PelletDistance(p, this.getCachedDistance(start, p, params)));
+        }
+
+        while(!edgeDistance.isEmpty())
+        {
+            PelletDistance currentEdge = edgeDistance.poll();
+            if(visited.contains(currentEdge.coord))
+            {
+                continue;
+            }
+            totalWeight = totalWeight + currentEdge.distance;
+            visited.add(currentEdge.coord);
+            for(Coordinate p : src.getRemainingPelletCoordinates())
+            {
+                if(!visited.contains(p))
+                {
+                    edgeDistance.add(new PelletDistance(p, this.getCachedDistance(currentEdge.coord, p, params)));
+                }
+            }
+        }
+
+        return totalWeight;
+    }
+
     @Override
     public Collection<PelletVertex> getOutgoingNeighbors(final PelletVertex src,
                                                          final GameView game,
@@ -100,21 +172,7 @@ public class ThriftyPelletRouter
         PelletExtraParams ep = (PelletExtraParams)params;
         Coordinate c1 = src.getPacmanCoordinate();
         Coordinate c2 = dst.getPacmanCoordinate();
-
-        if(ep.cache.containsKey(c1) && ep.cache.get(c1).containsKey(c2))
-        {
-            return ep.cache.get(c1).get(c2);
-        }
-
-        Path<Coordinate> path = ep.boardRouter.graphSearch(c1, c2, ep.game);
-        float dist = (path == null) ? Float.POSITIVE_INFINITY : path.getTrueCost();
-
-        ep.cache.putIfAbsent(c1, new HashMap<>());
-        ep.cache.get(c1).put(c2,dist);
-        ep.cache.putIfAbsent(c2, new HashMap<>());
-        ep.cache.get(c2).put(c1, dist);
-
-        return dist;
+        return this.getCachedDistance(c1, c2, ep);
     }
 
     @Override
@@ -125,60 +183,24 @@ public class ThriftyPelletRouter
         if(!src.getRemainingPelletCoordinates().isEmpty())
         {
             PelletExtraParams ep = (params == null) ? null : (PelletExtraParams)params;
-            float totalWeight =0.0f;
-            float distance;
-            PriorityQueue<PelletDistance> edgeDistance = new PriorityQueue<>();
-            Set<Coordinate> visited = new HashSet<>();
+            float totalWeight = 0.0f;
             Set<Coordinate> mstKey = new HashSet<>(src.getRemainingPelletCoordinates());
-            Coordinate start = src.getRemainingPelletCoordinates().iterator().next(); //any random pellet as the starting point
 
-            if(ep != null && ep.mstCache.containsKey(mstKey))
+            // The MST depends only on which pellets remain, not on the order the search reached them,
+            // so memoizing by the pellet set avoids recomputing the same Prim expansion many times.
+            if(ep != null)
             {
-                totalWeight = ep.mstCache.get(mstKey);
-            }
-            else
-            {
-                visited.add(start);
-                //prim's algorithm to find MST
-                for(Coordinate p : src.getRemainingPelletCoordinates())
-                {
-                    if(visited.contains(p))
-                    {
-                        continue;
-                    }
-                    distance = getEdgeWeight(src.removePellet(start), src.removePellet(p), params);
-                    edgeDistance.add(new PelletDistance(p,distance));
-                }
-
-                while(!edgeDistance.isEmpty())
-                {
-                    PelletDistance currentEdge = edgeDistance.poll();
-                    if(visited.contains(currentEdge.coord))
-                    {
-                        continue;
-                    }
-                    totalWeight = totalWeight + currentEdge.distance;
-                    visited.add(currentEdge.coord);
-                    for(Coordinate p : src.getRemainingPelletCoordinates())
-                    {
-                        if(!visited.contains(p))
-                        {
-                            float d = getEdgeWeight(src.removePellet(currentEdge.coord), src.removePellet(p), params);
-                            edgeDistance.add(new PelletDistance(p, d));
-                        }
-                    }
-                }
-
-                if(ep != null)
-                {
-                    ep.mstCache.put(mstKey, totalWeight);
-                }
+                totalWeight = ep.mstCache.computeIfAbsent(mstKey, key -> this.calculateMstWeight(src, ep));
             }
 
             float minSourceDist = Float.POSITIVE_INFINITY;
             for(Coordinate p : src.getRemainingPelletCoordinates())
             {
-                float d = getEdgeWeight(src, src.removePellet(p), params);
+                // This stays admissible because it is the true shortest board distance
+                // from Pacman to one remaining pellet, never an inflated estimate.
+                float d = (ep == null)
+                    ? DistanceMetric.manhattanDistance(src.getPacmanCoordinate(), p)
+                    : this.getCachedDistance(src, p, ep);
                 if(d<minSourceDist)
                 {
                     minSourceDist = d;
@@ -200,6 +222,20 @@ public class ThriftyPelletRouter
         sessionParams.cache.clear();
         sessionParams.mstCache.clear();
 
+        PriorityQueue<Path<PelletVertex>> q = new PriorityQueue<>(
+            (p1,p2) -> {
+                float f1 = p1.getTrueCost() + p1.getEstimatedPathCostToGoal();
+                float f2 = p2.getTrueCost() + p2.getEstimatedPathCostToGoal();
+                return Float.compare(f1,f2);
+            }
+        );
+        Set<PelletVertex> visited = new HashSet<>(); //store the visited states
+        Path<PelletVertex> start = new Path<>(initial);
+        float pathCost;
+        float heuristic;
+        q.add(start);
+        // This one-time nested loop pays the board-search cost up front,
+        // so every later heuristic edge lookup becomes a HashMap read instead of a BFS.
         List<Coordinate> importantCoords = new ArrayList<>(initial.getRemainingPelletCoordinates());
         importantCoords.add(initial.getPacmanCoordinate());
         for(int i = 0; i < importantCoords.size(); i++)
@@ -214,28 +250,13 @@ public class ThriftyPelletRouter
                     continue;
                 }
 
-                Path<Coordinate> pairPath = br.graphSearch(c1, c2, game);
-                float dist = (pairPath == null) ? Float.POSITIVE_INFINITY : pairPath.getTrueCost();
-
+                float dist = this.getCachedDistance(c1, c2, sessionParams);
                 sessionParams.cache.get(c1).put(c2, dist);
                 sessionParams.cache.putIfAbsent(c2, new HashMap<>());
                 sessionParams.cache.get(c2).put(c1, dist);
             }
         }
 
-        PriorityQueue<Path<PelletVertex>> q = new PriorityQueue<>(
-            (p1,p2) -> {
-                float f1 = p1.getTrueCost() + p1.getEstimatedPathCostToGoal();
-                float f2 = p2.getTrueCost() + p2.getEstimatedPathCostToGoal();
-                return Float.compare(f1,f2);
-            }
-        );
-        Set<PelletVertex> visited = new HashSet<>(); //store the visited states
-        Path<PelletVertex> start = new Path<>(initial);
-        float pathCost;
-        float heuristic;
-        q.add(start);
-        //Collection<PelletVertex> rem = getOutgoingNeighbors(initial, game, null);
         while(!q.isEmpty())
         {
             Path<PelletVertex> pathChain = q.poll();
