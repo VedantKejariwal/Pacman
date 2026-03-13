@@ -69,6 +69,15 @@ public class PacmanAgent
     {
         // If a live ghost gets close, an old plan may have become unsafe,
         // so this method asks whether we should recompute the route immediately.
+        /*
+        // Classic Version
+        List<Integer> allIds = game.getAllEntityIds(); // Get the list first
+
+        for (int i = 0; i < allIds.size(); i++) {
+            Integer id = allIds.get(i); // Manually pull the item out using the index 'i'
+            
+            // ... rest of the logic (getting the entity, checking if it's a Ghost)
+        } */
         for(Integer id : game.getAllEntityIds())
         {
             Entity entity = game.getEntity(id);
